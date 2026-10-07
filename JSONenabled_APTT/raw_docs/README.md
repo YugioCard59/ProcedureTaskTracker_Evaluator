@@ -1,0 +1,1 @@
+This directory holds PDF converted to text that were processed and sent by pdf_to_text_converter.py. These text files will be fed into json_builder.py to build JSONs.

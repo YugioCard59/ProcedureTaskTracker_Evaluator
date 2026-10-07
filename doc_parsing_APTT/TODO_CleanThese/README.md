@@ -1,0 +1,1 @@
+These PDFs are queued to be processed by pdf_reformatter.py and then sent to reformatted_clean dir for storage.

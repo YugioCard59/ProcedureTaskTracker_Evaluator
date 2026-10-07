@@ -1,0 +1,1 @@
+These PDFs were PDFs that have been reformatted by pdf_reformatter.py and then sent to subject matter expert (SME)/stakeholder to be modified. After modification these PDFs are stored here to be converted to text (?) and fed to JSONenabled_APTT/raw_docs to be processed by json_builder.py

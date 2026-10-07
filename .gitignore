@@ -1,0 +1,97 @@
+# ==========================================
+# 1. Virtual Environments & Python Core
+# ==========================================
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# 2. Testing and Code Coverage
+# ==========================================
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+
+# ==========================================
+# 3. Local Databases
+# ==========================================
+*.sqlite3
+*.db
+*.db-journal
+
+# ==========================================
+# 4. Cloud, Hosting, and Deployment
+# ==========================================
+.terraform/
+*.tfstate
+*.tfstate.backup
+.serverless/
+dist/
+build/
+
+# ==========================================
+# 5. C / C++ Compiled Binaries and Wheels
+# ==========================================
+*.so
+*.dll
+*.pyd
+*.o
+*.obj
+*.lib
+*.a
+*.exe
+*.whl
+
+# ==========================================
+# 6. AI Models & Speech-to-Text Assets
+# ==========================================
+# Ignores heavy downloaded model weights (Whisper, PyTorch, etc.) and local audio caches
+*.bin
+*.pt
+*.onnx
+*.safetensors
+.cache/huggingface/
+temp_audio/
+*.wav
+*.mp3
+
+# ==========================================
+# 7. Environment Variables & Secrets
+# ==========================================
+.env
+
+# ==========================================
+# 8. IDEs, Editors, & OS Junk Files
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ==========================================
+# 9. Output Logs and Reports and input docs
+# ==========================================
+*.zip
+*.html
+*.log
+*.pdf
+
+# Ignore all generated documents and data in the subfolders
+doc_parsing_APTT/**/*.pdf
+doc_parsing_APTT/**/*.txt
+doc_parsing_APTT/**/*.json
+JSONenabled_APTT/**/*.pdf
+JSONenabled_APTT/**/*.txt
+JSONenabled_APTT/**/*.json
+
+
+# (Optional) If you want to allow a README.md to stay in those folders:
+!doc_parsing_APTT/**/README.md
+!JSONenabled_APTT/**/README.md

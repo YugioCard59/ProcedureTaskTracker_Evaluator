@@ -1,0 +1,1 @@
+This directory holds keyword JSONs built by json_builder.py. These JSONs will be fed into skills_engine.py to run program.

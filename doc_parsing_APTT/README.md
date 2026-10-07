@@ -1,0 +1,1 @@
+This directory holds storage directories and pdf reformatting and pdf to text conversion logic.
