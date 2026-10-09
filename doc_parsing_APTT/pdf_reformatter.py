@@ -1,266 +1,421 @@
-import sys
+"""Clinical Procedure PDF Reformatter & Intelligent Two-Pass Indentation Parser.
+
+Adheres to object-oriented programming, clean code standards, and implements 
+precise indentation-based step grouping and continuation wrapping.
+"""
+
+import argparse
 import re
+import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
-
-# Logistic Note: From reformatted cleaned dir move or copy those PDF files to 
-# JSONenabled_APTT dir > raw_docs to be fed into json_builder to change to text and make JSON
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
-class CleanPDFReformatter:
-    """
-    Strips leftmost column and two rightmost columns from input PDF tables,
-    cleans glyphs/wingdings, and outputs a cleanly structured table PDF.
-    """
+@dataclass
+class ProcedureDocumentSchema:
+    """Structured representation of a clinical procedure document for JSON/API transport."""
+    main_title: str
+    elements: List[Dict[str, str]] = field(default_factory=list)
+    summary: Optional[str] = None
+    citations: Optional[str] = None
+    version: Optional[str] = None
 
-    STEP_PREFIX_REGEX = re.compile(
-        r"^(\(?\d+[\.\)]|\(?[a-zA-Z][\.\)]|\(?[ivxLCDM]+[\.\)])\s+(.*)",
-        re.IGNORECASE
-    )
 
-    def __init__(self, input_path: str, output_folder: str):
-        self.input_path = Path(input_path)
-        self.output_folder = Path(output_folder)
+class BaseTextExtractor(ABC):
+    """Abstract interface for document text extraction."""
+
+    @abstractmethod
+    def extract_lines(self, file_path: Path) -> List[Tuple[str, float, bool]]:
+        """Extracts text lines with horizontal coordinate (x0) and font-weight metadata."""
+        pass
+
+
+class LocalPDFTextExtractor(BaseTextExtractor):
+    """Local extractor using pdfplumber with precise X-coordinate and font inspection."""
+
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
+
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(f"  [DEBUG EXTRACTOR] {message}", flush=True)
 
     @staticmethod
-    def clean_text(text: str) -> str:
-        """Strips wingdings, unicode checkmarks, non-printable symbols, and normalizes spacing."""
-        if not text:
-            return ""
-        # Filter non-ASCII, Wingdings, checkmarks, ballot boxes, and bullet symbols
-        text = re.sub(r'[^\x20-\x7E\n\t°½⅓⅔¼¾⅛⅜⅝⅞±µμ]', '', text)
-        text = re.sub(r'[\u2700-\u27BF\u2600-\u26FF\u2B00-\u2BFF\u25A0-\u25FF\u2610-\u2612]', '', text)
-        lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.splitlines()]
-        return "\n".join([line for line in lines if line])
-
-    def parse_pdf(self, pdf_file_path: Path) -> Tuple[str, List[Dict[str, Any]]]:
-        """Slices out Column 0 and Last 2 Columns, preserving center content cells."""
-        raw_cells = []
-
-        with pdfplumber.open(pdf_file_path) as pdf:
-            for page in pdf.pages:
-                extracted_tables = page.extract_tables()
-                
-                if extracted_tables:
-                    for table in extracted_tables:
-                        for row in table:
-                            if not row:
-                                continue
-                            
-                            # Determine column slicing based on row length
-                            # Goal: Remove leftmost (index 0) and 2 rightmost (indices -2, -1)
-                            if len(row) > 3:
-                                target_cells = row[1:-2]
-                            elif len(row) == 3:
-                                target_cells = [row[1]]  # Keep middle column only
-                            elif len(row) == 2:
-                                target_cells = [row[0]]  # Fallback: drop rightmost column
-                            else:
-                                target_cells = row
-
-                            row_content = []
-                            for cell in target_cells:
-                                if not cell:
-                                    continue
-                                cleaned = self.clean_text(cell)
-                                if cleaned:
-                                    row_content.append(cleaned)
-
-                            if row_content:
-                                raw_cells.append(row_content)
-
-        if not raw_cells:
-            return "Document", []
-
-        # Determine top main title
-        first_cell = raw_cells[0]
-        first_line = first_cell[0].splitlines()[0] if first_cell else "Document"
-        main_title = first_line
-
-        rows = []
-        is_first_cell = True
-
-        for cell_group in raw_cells:
-            cell_text = "\n".join(cell_group)
-            lines = [line.strip() for line in cell_text.splitlines() if line.strip()]
+    def _is_noise_line(line: str) -> bool:
+        """Filters out form fields, checkboxes, signatures, and column header bleeding."""
+        lower_line = line.lower()
+        
+        noise_triggers = [
+            "name:", "date:", "page ", "revised", "for educational use only",
+            "faculty signature", "student signature", "time completed", 
+            "start time", "end time", "comments:", "s/u", "✓", "✔"
+        ]
+        
+        if any(trigger in lower_line for trigger in noise_triggers):
+            return True
             
-            if not lines:
-                continue
+        # Filter table column artifacts like standalone ordinals, checkmarks, or symbols
+        if re.fullmatch(r"\b(\d+(st|nd|rd|th)|nd|rd|st|th)\b", lower_line.strip()):
+            return True
 
-            if is_first_cell and lines[0] == main_title:
-                lines = lines[1:]
-                is_first_cell = False
-                if not lines:
-                    continue
-            else:
-                is_first_cell = False
+        if re.fullmatch(r"[✓✔\s_\-/\\]+", line):
+            return True
+            
+        return False
 
-            if any("summary" in l.lower() for l in lines) or any("performance summary" in l.lower() for l in lines):
-                summary_content = "\n".join(lines)
-                rows.append({"type": "SUMMARY", "content": summary_content})
-                continue
+    @staticmethod
+    def _clean_text_debris(text: str) -> str:
+        """Removes stray table column headers and checkboxes embedded in text strings."""
+        text = re.sub(r"\b(\d+(st|nd|rd|th)|nd|rd|st|th)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"[✓✔]", "", text)
+        return re.sub(r"[ \t]+", " ", text).strip()
 
-            # Condition 1: Single line step / title cell
-            if len(lines) == 1:
-                line = lines[0]
-                is_step = bool(self.STEP_PREFIX_REGEX.match(line))
+    def extract_lines(self, file_path: Path) -> List[Tuple[str, float, bool]]:
+        extracted_data = []
+        try:
+            self._log(f"Opening PDF with pdfplumber: {file_path.name}")
+            with pdfplumber.open(file_path) as pdf:
+                total_pages = len(pdf.pages)
+                self._log(f"Total pages detected: {total_pages}")
                 
-                if not is_step and (line.isupper() or len(line.split()) <= 4):
-                    rows.append({"type": "TITLE", "content": line})
-                else:
-                    rows.append({"type": "STEP", "content": line})
-                    rows.append({"type": "RATIONALE", "content": ""})
+                for idx, page in enumerate(pdf.pages, start=1):
+                    self._log(f"--- Processing Page {idx} of {total_pages} ---")
+                    
+                    words = page.extract_words(keep_blank_chars=False, x_tolerance=2, y_tolerance=3, extra_attrs=["fontname"])
+                    if not words:
+                        continue
 
-            # Condition 2: Multi-line / Indented cell block
+                    lines_dict = []
+                    for word in words:
+                        top_y = round(word["top"] / 4) * 4
+                        found = False
+                        for l_item in lines_dict:
+                            if abs(l_item["y"] - top_y) <= 3:
+                                l_item["words"].append(word)
+                                found = True
+                                break
+                        if not found:
+                            lines_dict.append({"y": top_y, "words": [word]})
+
+                    lines_dict.sort(key=lambda x: x["y"])
+
+                    for l_item in lines_dict:
+                        line_words = sorted(l_item["words"], key=lambda w: w["x0"])
+                        x0_coord = line_words[0]["x0"] if line_words else 0.0
+                        
+                        is_bold = any("bold" in str(w.get("fontname", "")).lower() for w in line_words)
+
+                        line_str = " ".join([w["text"] for w in line_words])
+                        cleaned_line = self._clean_text_debris(line_str)
+                        cleaned_line = cleaned_line.rstrip(" _-/\\")
+
+                        if not cleaned_line:
+                            continue
+
+                        if self._is_noise_line(cleaned_line):
+                            continue
+                        else:
+                            extracted_data.append((cleaned_line, x0_coord, is_bold))
+
+        except Exception as err:
+            raise RuntimeError(f"Local extraction failed for {file_path.name}: {err}") from err
+            
+        return extracted_data
+
+
+class ProcedureParserService:
+    """Two-pass intelligent parser service managing strict indentation hierarchy and step wrapping."""
+
+    STEP_PREFIX_REGEX = re.compile(
+        r"^(\(?\d+[\.\)]|\(?[a-zA-Z][\.\)]|\(?[ivxLCDM]+[\.\)])\s*(.*)",
+        re.IGNORECASE,
+    )
+
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
+
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(f"  [DEBUG PARSER] {message}", flush=True)
+
+    def parse_stream_to_schema(self, line_stream: List[Tuple[str, float, bool]]) -> ProcedureDocumentSchema:
+        """Executes a two-pass sweep: Pass 1 tags structural roles, Pass 2 evaluates precise indentation wrappers."""
+        if not line_stream:
+            return ProcedureDocumentSchema(main_title="Clinical Procedure")
+
+        main_title = "Physical Assessment"
+        swept_lines = []
+        summary_lines = []
+        citations_lines = []
+        version_lines = []
+
+        parsing_state = "BODY"
+        first_line = True
+
+        # --- PASS 1: STRUCTURAL SWEEP & INITIAL CLASSIFICATION ---
+        for text, x0, is_bold in line_stream:
+            lower_text = text.lower()
+
+            if first_line:
+                main_title = re.sub(r"\s*\([^)]*\)", "", text).strip()
+                first_line = False
+                continue
+
+            if "performance summary" in lower_text or "summary measures" in lower_text:
+                parsing_state = "SUMMARY"
+                summary_lines.append(text)
+                continue
+            elif "citation" in lower_text:
+                parsing_state = "CITATIONS"
+                citations_lines.append(text)
+                continue
+            elif "version" in lower_text:
+                parsing_state = "VERSION"
+                version_lines.append(text)
+                continue
+
+            if parsing_state == "SUMMARY":
+                summary_lines.append(text)
+                continue
+            elif parsing_state == "CITATIONS":
+                citations_lines.append(text)
+                continue
+            elif parsing_state == "VERSION":
+                version_lines.append(text)
+                continue
+
+            has_prefix = bool(self.STEP_PREFIX_REGEX.match(text))
+            is_all_caps = text.isupper() and len(text.split()) > 1
+
+            # Titles are explicitly bolded or short all-caps headers at the left margin
+            if is_bold or (is_all_caps and x0 < 60 and not has_prefix and len(text.split()) <= 6):
+                line_type = "TITLE"
             else:
-                first_line = lines[0]
-                if self.STEP_PREFIX_REGEX.match(first_line):
-                    rows.append({"type": "STEP", "content": first_line})
+                line_type = "CANDIDATE_STEP"
+
+            swept_lines.append({"text": text, "type": line_type, "x0": x0})
+            self._log(f"Sweep Pass 1 [{line_type}] (x0={x0:.1f}, bold={is_bold}): {text[:50]}")
+
+        # --- PASS 2: INDENTATION HIERARCHY & WRAPPER ASSEMBLY ---
+        elements = []
+        current_step_content = None
+        baseline_step_x0 = None
+
+        for item in swept_lines:
+            ltype = item["type"]
+            text = item["text"]
+            x0 = item["x0"]
+
+            if ltype == "TITLE":
+                # Finalize any pending step before switching to a new title block
+                if current_step_content:
+                    elements.append({"type": "STEP", "content": current_step_content})
+                    elements.append({"type": "RATIONALE", "content": ""})
+                    current_step_content = None
+                
+                baseline_step_x0 = None  # Reset indentation baseline for new section
+                elements.append({"type": "TITLE", "content": text})
+            else:
+                # Check for explicit numbered prefix
+                match = self.STEP_PREFIX_REGEX.match(text)
+                if match:
+                    if current_step_content:
+                        elements.append({"type": "STEP", "content": current_step_content})
+                        elements.append({"type": "RATIONALE", "content": ""})
+                    current_step_content = match.group(2).strip()
+                    baseline_step_x0 = x0
+                    continue
+
+                # Establish baseline indentation for unnumbered lists if not set
+                if baseline_step_x0 is None:
+                    baseline_step_x0 = x0
+
+                # Indentation Rule: If x0 matches baseline (within 6 pts tolerance), it's a new step.
+                # If x0 is significantly larger (> baseline + 6), it's a continuation line.
+                if abs(x0 - baseline_step_x0) <= 6:
+                    if current_step_content:
+                        elements.append({"type": "STEP", "content": current_step_content})
+                        elements.append({"type": "RATIONALE", "content": ""})
+                    current_step_content = text
                 else:
-                    rows.append({"type": "TITLE", "content": first_line})
+                    # Deeper indentation -> wrap and append to current step
+                    if current_step_content:
+                        current_step_content += f" {text}"
+                    else:
+                        current_step_content = text
 
-                for sub_line in lines[1:]:
-                    rows.append({"type": "STEP", "content": sub_line})
+        # Finalize any trailing step
+        if current_step_content:
+            elements.append({"type": "STEP", "content": current_step_content})
+            elements.append({"type": "RATIONALE", "content": ""})
 
-                rows.append({"type": "RATIONALE", "content": ""})
+        summary_full = "<br/>".join(summary_lines) if summary_lines else None
+        citations_full = "<br/>".join(citations_lines) if citations_lines else None
+        version_full = "<br/>".join(version_lines) if version_lines else None
 
-        rows.append({"type": "CITATIONS", "content": ""})
-        rows.append({"type": "VERSION", "content": ""})
+        return ProcedureDocumentSchema(
+            main_title=main_title,
+            elements=elements,
+            summary=summary_full,
+            citations=citations_full,
+            version=version_full,
+        )
 
-        return main_title, rows
 
-    def generate_pdf(self, main_title: str, rows: List[Dict[str, Any]], dest_file_path: Path):
-        """Generates the clean reformatted PDF table grid."""
+class PDFReportGenerator:
+    """ReportLab PDF rendering engine enforcing strict alternating table formats."""
+
+    def __init__(self, dest_file_path: Path, verbose: bool = False) -> None:
+        self.dest_file_path = dest_file_path
+        self.verbose = verbose
+
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(f"  [DEBUG GENERATOR] {message}", flush=True)
+
+    def generate(self, schema: ProcedureDocumentSchema) -> None:
+        self._log(f"Building output PDF at: {self.dest_file_path}")
+        self.dest_file_path.parent.mkdir(parents=True, exist_ok=True)
         doc = SimpleDocTemplate(
-            str(dest_file_path),
+            str(self.dest_file_path),
             pagesize=letter,
             rightMargin=36,
             leftMargin=36,
             topMargin=36,
-            bottomMargin=36
+            bottomMargin=36,
         )
 
         styles = getSampleStyleSheet()
 
         main_title_style = ParagraphStyle(
-            'MainTitle',
-            parent=styles['Heading1'],
-            fontName='Helvetica-Bold',
+            "MainTitle",
+            parent=styles["Heading1"],
+            fontName="Helvetica-Bold",
             fontSize=13,
             leading=16,
             textColor=colors.black,
-            spaceAfter=10
+            spaceAfter=10,
         )
 
         cell_title_style = ParagraphStyle(
-            'CellTitle',
-            fontName='Helvetica-Bold',
+            "CellTitle",
+            fontName="Helvetica-Bold",
             fontSize=9.5,
             leading=12,
-            textColor=colors.black
+            textColor=colors.black,
         )
 
         cell_text_style = ParagraphStyle(
-            'CellText',
-            fontName='Helvetica',
+            "CellText",
+            fontName="Helvetica",
             fontSize=9,
             leading=12,
-            textColor=colors.HexColor('#111111')
+            textColor=colors.HexColor("#111111"),
         )
 
-        story = [Paragraph(f"<b>TITLE:</b> {main_title}", main_title_style), Spacer(1, 6)]
+        story = [Paragraph(f"<b>TITLE:</b> {schema.main_title}", main_title_style), Spacer(1, 6)]
         table_data = []
 
-        for item in rows:
-            itype = item["type"]
-            content = item["content"]
+        for el in schema.elements:
+            etype = el["type"]
+            content = el["content"]
 
-            if itype == "TITLE":
-                p = Paragraph(f"<b>TITLE:</b> {content}", cell_title_style)
-                table_data.append([p])
-            elif itype == "STEP":
-                p = Paragraph(f"<b>STEP:</b> {content}", cell_text_style)
-                table_data.append([p])
-            elif itype == "RATIONALE":
-                p = Paragraph("<b>RATIONALE:</b> " + content, cell_text_style)
-                table_data.append([p])
-            elif itype == "SUMMARY":
-                formatted_summary = content.replace("\n", "<br/>")
-                p = Paragraph(f"<b>SUMMARY:</b> {formatted_summary}", cell_text_style)
-                table_data.append([p])
-            elif itype == "CITATIONS":
-                table_data.append([Paragraph("<b>CITATIONS:</b>", cell_title_style)])
-            elif itype == "VERSION":
-                table_data.append([Paragraph("<b>VERSION:</b>", cell_title_style)])
+            if etype == "TITLE":
+                table_data.append([Paragraph(f"<b>TITLE:</b> {content}", cell_title_style)])
+            elif etype == "STEP":
+                table_data.append([Paragraph(f"<b>STEP:</b> {content}", cell_text_style)])
+            elif etype == "RATIONALE":
+                table_data.append([Paragraph("<b>RATIONALE:</b>", cell_text_style)])
+
+        if schema.summary:
+            table_data.append([Paragraph(f"<b>SUMMARY:</b><br/>{schema.summary}", cell_text_style)])
+        else:
+            table_data.append([Paragraph("<b>SUMMARY:</b>", cell_title_style)])
+
+        citations_text = schema.citations if schema.citations else ""
+        table_data.append([Paragraph(f"<b>CITATIONS:</b> {citations_text}", cell_title_style)])
+
+        version_text = schema.version if schema.version else ""
+        table_data.append([Paragraph(f"<b>VERSION:</b> {version_text}", cell_title_style)])
 
         if table_data:
             main_table = Table(table_data, colWidths=[540])
-            main_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.75, colors.black),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('TOPPADDING', (0, 0), (-1, -1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ('LEFTPADDING', (0, 0), (-1, -1), 6),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-            ]))
+            main_table.setStyle(
+                TableStyle([
+                    ("GRID", (0, 0), (-1, -1), 0.75, colors.black),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ])
+            )
             story.append(main_table)
 
         doc.build(story)
+        self._log("PDF build completed successfully.")
 
-    def process(self):
-        """Processes input file or directory into existing output folder."""
-        if not self.input_path.exists():
-            print(f"Error: Input path '{self.input_path}' does not exist.")
-            return
 
-        if not self.output_folder.exists() or not self.output_folder.is_dir():
-            print(f"Error: Output folder '{self.output_folder}' does not exist. Please check folder path.")
-            return
+class ApplicationController:
+    """Orchestrator pipeline managing extraction, parsing, and ReportLab generation."""
 
-        if self.input_path.is_file():
-            if self.input_path.suffix.lower() != ".pdf":
-                print(f"Error: Path '{self.input_path}' is not a PDF file.")
-                return
+    def __init__(self, extractor: BaseTextExtractor, parser: ProcedureParserService, verbose: bool = False) -> None:
+        self.extractor = extractor
+        self.parser = parser
+        self.verbose = verbose
 
-            out_file_name = f"{self.input_path.stem}_cleaned.pdf"
-            dest_file_path = self.output_folder / out_file_name
+    def process_file(self, input_file: Path, output_folder: Path) -> Path:
+        output_folder.mkdir(parents=True, exist_ok=True)
+        dest_path = output_folder / f"{input_file.stem}_cleaned.pdf"
 
-            print(f"Processing single PDF: '{self.input_path.name}'...")
-            title, rows = self.parse_pdf(self.input_path)
-            self.generate_pdf(title, rows, dest_file_path)
-            print(f"  ✓ Saved clean table PDF to: '{dest_file_path}'\n")
-            return
-
-        pdf_files = [f for f in self.input_path.rglob("*.pdf") if not f.name.endswith("_cleaned.pdf")]
-
-        if not pdf_files:
-            print(f"No original PDF files found in '{self.input_path}'.")
-            return
-
-        print(f"Found {len(pdf_files)} PDF file(s) in '{self.input_path}'.\n")
-
-        for pdf_file in pdf_files:
-            out_file_name = f"{pdf_file.stem}_cleaned.pdf"
-            dest_file_path = self.output_folder / out_file_name
-
-            print(f"Processing: {pdf_file.name} ...")
-            title, rows = self.parse_pdf(pdf_file)
-            self.generate_pdf(title, rows, dest_file_path)
-            print(f"  ✓ Saved to: '{dest_file_path}'\n")
-
-        print("Done processing all files!")
+        raw_stream = self.extractor.extract_lines(input_file)
+        schema = self.parser.parse_stream_to_schema(raw_stream)
+        
+        generator = PDFReportGenerator(dest_path, verbose=self.verbose)
+        generator.generate(schema)
+        
+        return dest_path
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python pdf_reformatter.py <input_file_or_folder> <existing_destination_folder>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Clinical Procedure Reformatter & JSON Schema Generator Pipeline.")
+    parser.add_argument("input", nargs="?", type=Path, default=Path(__file__).parent / "TODO_CleanThese", help="Path to input PDF file or directory.")
+    parser.add_argument("output", nargs="?", type=Path, default=Path(__file__).parent / "reformatted_cleaned", help="Path to output directory.")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging.")
 
-    reformatter = CleanPDFReformatter(sys.argv[1], sys.argv[2])
-    reformatter.process()
+    args = parser.parse_args()
+
+    extractor = LocalPDFTextExtractor(verbose=args.verbose)
+    parser_service = ProcedureParserService(verbose=args.verbose)
+    controller = ApplicationController(extractor=extractor, parser=parser_service, verbose=args.verbose)
+
+    try:
+        if args.input.is_file():
+            if args.input.suffix.lower() != ".pdf":
+                print(f"❌ Error: '{args.input}' is not a valid PDF file.")
+                sys.exit(1)
+            print(f"📄 Processing single PDF: '{args.input.name}'...", flush=True)
+            out = controller.process_file(args.input, args.output)
+            print(f"✨ Done! Saved to: '{out}'", flush=True)
+        elif args.input.is_dir():
+            print(f"📂 Scanning directory: '{args.input}'...", flush=True)
+            pdf_files = [f for f in args.input.rglob("*.pdf") if not f.name.endswith("_cleaned.pdf")]
+            for pdf_file in pdf_files:
+                print(f"🔄 Processing: {pdf_file.name} ...", flush=True)
+                out_path = controller.process_file(pdf_file, args.output)
+                print(f"  ✓ Saved to: '{out_path}'\n", flush=True)
+            print("✨ Done processing all files!", flush=True)
+        else:
+            print(f"❌ Error: Path '{args.input}' does not exist.")
+            sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Process interrupted by user (Ctrl + C). Exiting safely...", flush=True)
+        sys.exit(0)

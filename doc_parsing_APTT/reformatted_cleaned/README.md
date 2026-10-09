@@ -1,1 +1,1 @@
-These PDFs have been parsed and cleaned by pdf_reformer.py
+These PDFs have been parsed and cleaned by pdf_reformatter.py. These reformatted PDF files can then be sent via email to a SME for modification such as to add rationales in the rationale section, etc. These SME modified PDF files can then be returned and saved into returnedPDF/   This directory should be cleaned out periodically.

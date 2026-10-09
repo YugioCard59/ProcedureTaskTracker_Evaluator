@@ -1,1 +1,1 @@
-This directory holds keyword JSONs built by json_builder.py. These JSONs will be fed into skills_engine.py to run program.
+This directory holds keyword JSONs. The JSON skeleton specific to a procedure is built by json_builder.py. Once in this directory an SME can open the JSON and add keywords and levels and modify as needed then save the JSON in this directory configs/. These JSONs will be fed into skills_engine.py to run program.

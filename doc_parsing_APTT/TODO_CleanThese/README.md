@@ -1,1 +1,1 @@
-These PDFs are queued to be processed by pdf_reformatter.py and then sent to reformatted_clean dir for storage.
+These pdf files need to be reformatted through pdf_reformatter.py and then the reformatted pdf file should be saved to reformatted_cleaned/ directory to later be send via email to a SME for modification. These files should be removed automatically if reformatting by pdf_reformatter.py was successful.

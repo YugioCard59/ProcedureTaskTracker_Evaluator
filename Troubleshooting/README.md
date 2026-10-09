@@ -1,0 +1,1 @@
+This directory holds saved zip logs for testing and troubleshooting skill_builder.py output.

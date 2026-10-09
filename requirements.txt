@@ -27,3 +27,13 @@ tzdata==2026.3
 tzlocal==5.4.4
 urllib3==2.7.0
 webrtcvad-wheels==2.0.14
+
+SpeechRecognition>=3.10.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+webrtcvad-wheels>=2.0.14
+Metaphone>=0.6
+pypdf>=3.0.0
+
+pdfplumber>=0.10.0
+reportlab>=4.0.0
